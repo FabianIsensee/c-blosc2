@@ -87,37 +87,23 @@ static int check_one(int8_t ndim, int32_t itemsize, const int64_t *src_pad_shape
 }
 
 
-// One b2nd_zero_box() against zeroing item by item; returns 0 when the buffers match.
+// One b2nd_zero_box() against the reference copying zeros item by item; returns 0 when the buffers match.
 static int check_zero_one(int8_t ndim, int32_t itemsize, const int64_t *pad_shape, const int64_t *box_start,
                           const int64_t *box_stop) {
-  int64_t nitems = 1;
-  int64_t box_nitems = 1;
-  int64_t box_shape[B2ND_MAX_DIM];
+  int64_t nbytes = itemsize;
   for (int i = 0; i < ndim; ++i) {
-    nitems *= pad_shape[i];
-    box_shape[i] = box_stop[i] - box_start[i];
-    box_nitems *= box_shape[i];
+    nbytes *= pad_shape[i];
   }
-  uint8_t *buf = malloc(nitems * itemsize);
-  uint8_t *ref = malloc(nitems * itemsize);
-  for (int64_t i = 0; i < nitems * itemsize; ++i) {
+  uint8_t *zeros = calloc(nbytes, 1);
+  uint8_t *buf = malloc(nbytes);
+  uint8_t *ref = malloc(nbytes);
+  for (int64_t i = 0; i < nbytes; ++i) {
     buf[i] = ref[i] = (uint8_t) (0x5A ^ i) | 1;
   }
   b2nd_zero_box(ndim, itemsize, buf, pad_shape, box_start, box_stop);
-  int64_t index[B2ND_MAX_DIM];
-  for (int64_t n = 0; n < box_nitems; ++n) {
-    int64_t rest = n;
-    for (int i = ndim - 1; i >= 0; --i) {
-      index[i] = rest % box_shape[i];
-      rest /= box_shape[i];
-    }
-    int64_t off = 0;
-    for (int i = 0; i < ndim; ++i) {
-      off = off * pad_shape[i] + box_start[i] + index[i];
-    }
-    memset(ref + off * itemsize, 0, itemsize);
-  }
-  int bad = memcmp(buf, ref, nitems * itemsize) != 0;
+  reference_copy(ndim, itemsize, zeros, pad_shape, box_start, box_stop, ref, pad_shape, box_start);
+  int bad = memcmp(buf, ref, nbytes) != 0;
+  free(zeros);
   free(buf);
   free(ref);
   return bad;

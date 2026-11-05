@@ -1695,18 +1695,13 @@ int get_set_slice(void *buffer, int64_t buffersize, const int64_t *start, const 
       }
     }
     if (!slice_zeroed && 4 * zero_nitems >= nelems_slice) {
-      if (slice_only) {
-        // Just the slice's box of the larger buffer
-        int64_t zstart[B2ND_MAX_DIM] = {0};
-        int64_t zstop[B2ND_MAX_DIM];
-        for (int i = 0; i < ndim; ++i) {
-          zstop[i] = stop[i] - start[i];
-        }
-        b2nd_zero_box(ndim, array->sc->typesize, buffer_b, shape, zstart, zstop);
+      // The slice's box of the buffer (the whole buffer unless slice_only; one memset() then)
+      int64_t zstart[B2ND_MAX_DIM] = {0};
+      int64_t zstop[B2ND_MAX_DIM];
+      for (int i = 0; i < ndim; ++i) {
+        zstop[i] = stop[i] - start[i];
       }
-      else {
-        memset(buffer_b, 0, (size_t) slice_nbytes);
-      }
+      b2nd_zero_box(ndim, array->sc->typesize, buffer_b, shape, zstart, zstop);
       slice_zeroed = true;
     }
   }
