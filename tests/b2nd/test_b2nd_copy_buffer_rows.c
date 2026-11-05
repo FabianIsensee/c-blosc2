@@ -168,8 +168,9 @@ CUTEST_TEST_TEST(copy_buffer_rows) {
                   check_one(ndim, itemsize, src_pad_shape, src_start, src_stop, dst_pad_shape, dst_start) == 0);
   }
 
-  // Dimensions that the copy covers whole in one or both buffers (merged into the next outer one when whole in
-  // both) and dimensions one item wide (dropped), in any position
+  // Dimensions that the copy covers whole in one or both buffers (merged into the one inside it when whole in
+  // both) and dimensions one item wide (dropped), in any position; up to 8 dimensions, which keeps buffers of
+  // extents up to 7 small
   for (int n = 0; n < 3000; ++n) {
     int8_t ndim = (int8_t) rand_range(1, 8);
     int32_t itemsize = rand_itemsizes[rand_range(0, 6)];
@@ -206,7 +207,8 @@ CUTEST_TEST_TEST(copy_buffer_rows) {
                   check_one(4, 1, src_pad_shape, src_start, src_stop, dst_pad_shape, dst_start) == 0);
   }
 
-  // b2nd_zero_box(): boxes with dimensions covered whole or one item wide, the whole buffer and empty boxes
+  // b2nd_zero_box(): boxes with dimensions covered whole or one item wide, the whole buffer and empty boxes (up
+  // to 8 dimensions, as above)
   for (int n = 0; n < 3000; ++n) {
     int8_t ndim = (int8_t) rand_range(1, 8);
     int32_t itemsize = rand_itemsizes[rand_range(0, 6)];

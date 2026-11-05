@@ -39,8 +39,14 @@ int64_t b2nd_get_slice_nchunks(const b2nd_array_t *array, const int64_t *start, 
                                int64_t **chunks_idx);
 
 /**
- * @brief Zero the box [box_start, box_stop) of a C-order buffer of shape @p dst_pad_shape (nothing if the box is
- * empty), in as few and as long runs of bytes as its layout allows.
+ * @brief Zero a box of a C-order buffer, in as few and as long runs of bytes as its layout allows.
+ *
+ * @param ndim The number of dimensions of the buffer.
+ * @param itemsize The size of an item in bytes.
+ * @param dst The buffer.
+ * @param dst_pad_shape The shape of the buffer.
+ * @param box_start The coordinates where the box begins.
+ * @param box_stop The coordinates where the box ends (exclusive); nothing is zeroed if the box is empty.
  */
 void b2nd_zero_box(int8_t ndim, int32_t itemsize, void *dst, const int64_t *dst_pad_shape,
                    const int64_t *box_start, const int64_t *box_stop);
