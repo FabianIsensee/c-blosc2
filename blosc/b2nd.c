@@ -1316,18 +1316,9 @@ static int slice_gather_prefilter(blosc2_prefilter_params *params) {
 
 
 // A temporary of a slice read or write on `array`, released with
-// blosc2_tmp_free(ptr, *capacity).  Frames do not keep the buffers handed to
-// them, so their slice temporaries cycle through the per-thread cache.  Plain
-// in-memory super-chunks keep each new chunk, and caching their scratch
-// changes how glibc places those chunks (its mmap threshold follows the
-// buffers freed) for the worse; their buffers are plain malloc ones (of no
-// capacity, which blosc2_tmp_free() frees).
+// blosc2_tmp_free(ptr, *capacity) (see schunk_scratch_malloc()).
 static uint8_t *scratch_malloc(const b2nd_array_t *array, int32_t nbytes, size_t *capacity) {
-  if (array->sc->frame != NULL) {
-    return blosc2_tmp_malloc((size_t) nbytes, capacity);
-  }
-  *capacity = 0;
-  return malloc((size_t) nbytes);
+  return schunk_scratch_malloc(array->sc, nbytes, capacity);
 }
 
 
@@ -3372,7 +3363,6 @@ int iter_chunk(b2nd_array_t *array, int8_t ndim,
       b2nd_selection_t **p_chunk_selection_1 = malloc(array->ndim * sizeof(b2nd_selection_t *));
       int64_t *chunk_selection_size = malloc(array->ndim * sizeof(int64_t));
       bool *maskout = NULL;
-      uint8_t *chunk = NULL;
       int data_nbytes = chunk_data_nbytes;
       uint8_t *data = chunk_data;
       int rc = BLOSC2_ERROR_SUCCESS;
@@ -3427,28 +3417,14 @@ int iter_chunk(b2nd_array_t *array, int8_t ndim,
       }
 
       if (!get) {
-        int32_t chunk_size = data_nbytes + BLOSC_EXTENDED_HEADER_LENGTH;
-        chunk = malloc(chunk_size);
-        if (chunk == NULL) {
-          rc = BLOSC2_ERROR_MEMORY_ALLOC;
-          goto chunk_done;
-        }
-        if (blosc2_compress_ctx(array->sc->cctx, data, data_nbytes, chunk, chunk_size) < 0) {
-          BLOSC_TRACE_ERROR("Error compressing data");
+        if (blosc2_schunk_update_buffer(array->sc, nchunk, data, data_nbytes) < 0) {
+          BLOSC_TRACE_ERROR("Error compressing and updating chunk");
           rc = BLOSC2_ERROR_FAILURE;
           goto chunk_done;
         }
-        if (blosc2_schunk_update_chunk(array->sc, nchunk, chunk, false) < 0) {
-          // A failed update leaves the chunk to us
-          BLOSC_TRACE_ERROR("Error updating chunk");
-          rc = BLOSC2_ERROR_FAILURE;
-          goto chunk_done;
-        }
-        chunk = NULL;
       }
 
       chunk_done:
-      free(chunk);
       free(maskout);
       free(chunk_selection_size);
       free(p_chunk_selection_0);
