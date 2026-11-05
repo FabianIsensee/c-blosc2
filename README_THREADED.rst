@@ -81,3 +81,12 @@ data, and it spends more CPU per byte the more threads read the same file at onc
 The two kinds of threads are independent: a program that runs many reader processes can keep one decompression thread
 per process (`nthreads=1`) and still use read-ahead threads in each.  Read-ahead is off by default and has no effect on
 Windows.
+
+Threads and fork()
+------------------
+
+Threads do not survive `fork()`: a child process has none of its parent's compression, decompression or read-ahead
+threads and starts its own on first use, also for the contexts and arrays it inherited.  While another thread is inside
+a call that uses the global context (`blosc2_compress()`, `blosc2_decompress()`, `blosc2_set_nthreads()`, ...), `fork()`
+waits for that call to return.  As with any library, a context or frame that another thread was using at the moment of
+the `fork()` must not be used in the child.
