@@ -47,6 +47,13 @@
 /* Smaller chunks are read whole: their header would cost a round trip for little data */
 #define PARTIAL_MIN_NBYTES (4 * GAP_NBYTES)
 
+/* How much of each end of a frame file is asked for at open: of its start the header, of its end the trailer and,
+   unless the frame has a huge number of chunks, the chunk index right before it */
+#define OPEN_EACH_END_NBYTES (64 * 1024)
+
+/* Frame files up to this size (from the frame's offset on) are asked for whole at open when read-ahead is on */
+#define OPEN_WHOLE_NBYTES (1024 * 1024)
+
 static int g_nthreads = 0;
 static int64_t g_max_ahead = BLOSC2_PREFETCH_MAX_AHEAD_DEFAULT;
 static int64_t g_piece_size = BLOSC2_PREFETCH_PIECE_SIZE_DEFAULT;
@@ -74,11 +81,11 @@ bool prefetch_applies(const blosc2_frame_s *frame) {
   return false;
 }
 
-void prefetch_hint(const blosc2_io *io, void *fp, int64_t offset, int64_t nbytes) {
+void prefetch_open_hint(const blosc2_io *io, void *fp, int64_t offset, int64_t file_size) {
   BLOSC_UNUSED_PARAM(io);
   BLOSC_UNUSED_PARAM(fp);
   BLOSC_UNUSED_PARAM(offset);
-  BLOSC_UNUSED_PARAM(nbytes);
+  BLOSC_UNUSED_PARAM(file_size);
 }
 
 prefetch_batch* prefetch_batch_new(blosc2_frame_s *frame, const int64_t *nchunks, int64_t n,
@@ -325,11 +332,25 @@ static void advise_willneed(int fd, int64_t offset, int64_t nbytes) {
 }
 
 
-void prefetch_hint(const blosc2_io *io, void *fp, int64_t offset, int64_t nbytes) {
+void prefetch_open_hint(const blosc2_io *io, void *fp, int64_t offset, int64_t file_size) {
   int fd;
   const uint8_t *map;
-  if (prefetch_enabled() && nbytes > 0 && fp != NULL && backend_fd(io, fp, &fd, &map)) {
+  int64_t nbytes = file_size - offset;
+  if (nbytes <= 0 || fp == NULL || !backend_fd(io, fp, &fd, &map)) {
+    return;
+  }
+  if (nbytes <= 2 * OPEN_EACH_END_NBYTES) {
     advise_willneed(fd, offset, nbytes);
+    return;
+  }
+  /* Both ends are read right after the open, so they are asked for with read-ahead off too, and before the rest of a
+     small frame, so that the header does not wait behind a read of the whole frame.  For a mapped frame this also
+     keeps the header access from being a page fault on an uncached page, which reads the whole fault-around window
+     before it returns (4-8 MiB on SMB mounts). */
+  advise_willneed(fd, offset, OPEN_EACH_END_NBYTES);
+  advise_willneed(fd, file_size - OPEN_EACH_END_NBYTES, OPEN_EACH_END_NBYTES);
+  if (prefetch_enabled() && nbytes <= OPEN_WHOLE_NBYTES) {
+    advise_willneed(fd, offset + OPEN_EACH_END_NBYTES, nbytes - 2 * OPEN_EACH_END_NBYTES);
   }
 }
 
