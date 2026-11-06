@@ -54,6 +54,10 @@
 /* Frame files up to this size (from the frame's offset on) are asked for whole at open when read-ahead is on */
 #define OPEN_WHOLE_NBYTES (1024 * 1024)
 
+/* After this many slices of mapped frames in a row found everything they need in the page cache, slices of mapped
+   frames stop asking (see trust_cache()) */
+#define TRUST_CACHED_NSLICES 64
+
 static int g_nthreads = 0;
 static int64_t g_max_ahead = BLOSC2_PREFETCH_MAX_AHEAD_DEFAULT;
 static int64_t g_piece_size = BLOSC2_PREFETCH_PIECE_SIZE_DEFAULT;
@@ -127,6 +131,7 @@ bool prefetch_applies(const blosc2_frame_s *frame) {
 #include <fcntl.h>
 #include <pthread.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -505,9 +510,10 @@ static void add_piece(prefetch_batch *batch, piece_t *piece) {
 
 /* Start reading the uncached parts of the byte ranges (2 values each: offset, nbytes) of chunks nchunks[0..n) with the
    pool, chunk i's being ranges first_range[i]..first_range[i + 1], in pieces of at most the piece size, ranges that
-   follow each other in the file joined.  NULL if there is nothing to read. */
+   follow each other in the file joined.  NULL if there is nothing to read; then @p all_cached tells whether that is
+   because all of it is cached. */
 static prefetch_batch* batch_start(const cache_query *query, int fd, const int64_t *nchunks, int64_t n,
-                                   const int64_t *ranges, const int64_t *first_range) {
+                                   const int64_t *ranges, const int64_t *first_range, bool *all_cached) {
   int64_t piece_size = g_piece_size;
   int nthreads = g_nthreads;
   if (nthreads <= 0) {
@@ -518,6 +524,7 @@ static prefetch_batch* batch_start(const cache_query *query, int fd, const int64
     capacity += ranges[2 * r + 1] / CHECK_NBYTES + ranges[2 * r + 1] / piece_size + 3;  // windows per range
   }
   if (capacity == 0) {
+    *all_cached = true;
     return NULL;
   }
   prefetch_batch *batch = calloc(1, sizeof(prefetch_batch) + 2 * n * sizeof(int64_t) + capacity * sizeof(piece_t));
@@ -561,6 +568,7 @@ static prefetch_batch* batch_start(const cache_query *query, int fd, const int64
     add_piece(batch, &cur);
   }
 
+  *all_cached = batch->npieces == 0;
   batch->fd = batch->npieces > 0 ? fcntl(fd, F_DUPFD_CLOEXEC, 0) : -1;
   if (batch->fd < 0) {
     free(batch);
@@ -666,7 +674,8 @@ static int64_t block_ranges(const uint8_t *head, int64_t head_nbytes, int64_t ch
    the page cache check costs per page on file systems that cache files in single pages (NFS on Linux 6.8: ~22 us per
    MiB), where checking whole chunks of which a slice needs a part made read-ahead cost cached slices several percent. */
 static prefetch_batch* plan_and_start(int fd, const uint8_t *map, const int64_t *nchunks, int64_t n,
-                                      const int64_t *ranges, const bool *const *maskouts, int64_t nblocks) {
+                                      const int64_t *ranges, const bool *const *maskouts, int64_t nblocks,
+                                      bool *all_cached) {
   int64_t page = sysconf(_SC_PAGESIZE);
   int64_t lo = INT64_MAX;
   int64_t hi = 0;
@@ -677,6 +686,7 @@ static prefetch_batch* plan_and_start(int fd, const uint8_t *map, const int64_t 
     }
   }
   if (hi == 0 || page <= 0) {
+    *all_cached = hi == 0;  // nothing in the file to read (special-value chunks only)
     return NULL;
   }
   enum {SKIP, WHOLE, PART};
@@ -730,13 +740,35 @@ static prefetch_batch* plan_and_start(int fd, const uint8_t *map, const int64_t 
       nplanned += nranges > 0 ? nranges : 0;
     }
     first_range[n] = nplanned;
-    batch = batch_start(&query, fd, nchunks, n, planned, first_range);
+    batch = batch_start(&query, fd, nchunks, n, planned, first_range, all_cached);
   }
   cache_query_destroy(&query);
   free(planned);
   free(first_range);
   free(plan);
   return batch;
+}
+
+
+/* Slices of mapped frames in a row that found everything they need in the page cache, and the process's major page
+   faults when the last slice of a mapped frame started */
+static int64_t g_cached_streak = 0;
+static long g_majflt = -1;
+
+/* Whether a slice of a mapped frame should skip asking the page cache and take its data as cached.  Asking costs per
+   page on file systems that cache files in single pages (NFS on Linux 6.8: ~22 us per MiB), which on cached data is a
+   few to ~15% of a slice.  A mapped slice that touches an uncached page takes a major page fault, so the process's
+   major faults tell when to start asking again: any since the last slice of a mapped frame started (in any thread)
+   resets the streak.  The faulting slice itself has gone without read-ahead. */
+static bool trust_cache(void) {
+  struct rusage ru;
+  long majflt = getrusage(RUSAGE_SELF, &ru) == 0 ? ru.ru_majflt : -1;
+  long prev = __atomic_exchange_n(&g_majflt, majflt, __ATOMIC_RELAXED);
+  if (majflt < 0 || majflt != prev) {
+    __atomic_store_n(&g_cached_streak, 0, __ATOMIC_RELAXED);
+    return false;
+  }
+  return __atomic_load_n(&g_cached_streak, __ATOMIC_RELAXED) >= TRUST_CACHED_NSLICES;
 }
 
 
@@ -747,6 +779,10 @@ prefetch_batch* prefetch_batch_new(blosc2_frame_s *frame, const int64_t *nchunks
   }
   const blosc2_io *io = frame->schunk->storage->io;
   blosc2_io_cb *io_cb = blosc2_get_io_cb(io->id);
+  bool mapped = io_cb != NULL && !io_cb->is_allocation_necessary;
+  if (mapped && trust_cache()) {
+    return NULL;
+  }
   int64_t *ranges = malloc(2 * n * sizeof(int64_t));
   if (io_cb == NULL || ranges == NULL || frame_lock(frame, false) < 0) {
     free(ranges);
@@ -758,7 +794,14 @@ prefetch_batch* prefetch_batch_new(blosc2_frame_s *frame, const int64_t *nchunks
     int fd;
     const uint8_t *map;
     if (fp != NULL && backend_fd(io, fp, &fd, &map)) {
-      batch = plan_and_start(fd, map, nchunks, n, ranges, maskouts, nblocks);
+      bool all_cached = false;
+      batch = plan_and_start(fd, map, nchunks, n, ranges, maskouts, nblocks, &all_cached);
+      if (mapped && all_cached) {
+        __atomic_add_fetch(&g_cached_streak, 1, __ATOMIC_RELAXED);
+      }
+      else if (mapped) {
+        __atomic_store_n(&g_cached_streak, 0, __ATOMIC_RELAXED);
+      }
     }
     if (fp != NULL) {
       frame_reader_release(frame, io_cb, fp);
