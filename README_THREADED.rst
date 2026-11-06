@@ -51,6 +51,16 @@ that simply calls `dojob` on the given `jobdata` array for `numjobs` elements of
 
 The `blosc2_set_threads_callback` function should be called before any Blosc function (before any Blosc contexts are created), to inhibit Blosc from spawning its own worker threads.   In this case, `blosc2_set_nthreads` and similar functions set an upper bound to the `numjobs` that is passed to your `threads_callback` rather than an actual number of threads.
 
+Codecs and filters that need the calling thread
+-----------------------------------------------
+
+Some codec and filter callbacks may only run on the thread that called Blosc, e.g. because they need a lock that
+thread holds (the GIL of Python, for codecs and filters written in Python) or because they are not thread-safe.
+Register them with `blosc2_register_codec_flags(codec, BLOSC2_CALLING_THREAD_ONLY)` or
+`blosc2_register_filter_flags(filter, BLOSC2_CALLING_THREAD_ONLY)`: every chunk that uses one of them is then
+compressed and decompressed on the calling thread, one block after another, whatever `nthreads`,
+`blosc2_set_nthreads` or `BLOSC_NTHREADS` say.  Other chunks still use the threads.
+
 Read-ahead threads
 ------------------
 

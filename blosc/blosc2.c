@@ -92,6 +92,11 @@ uint8_t g_ncodecs = 0;
 static blosc2_filter g_filters[256] = {0};
 static uint64_t g_nfilters = 0;
 
+/* The codecs and filters, by id, registered with BLOSC2_CALLING_THREAD_ONLY, and whether there is any */
+static bool g_codec_calling_thread[256] = {0};
+static bool g_filter_calling_thread[256] = {0};
+static bool g_any_calling_thread_only = false;
+
 static blosc2_io_cb g_ios[256] = {0};
 static uint64_t g_nio = 0;
 
@@ -904,6 +909,12 @@ int read_chunk_header(const uint8_t* src, int32_t srcsize, bool extended_header,
   return 0;
 }
 
+/* The codec of a chunk: a user codec's id is in the extended header */
+static inline int header_compcode(const blosc_header* header) {
+  int compcode = header->flags >> 5;
+  return compcode == BLOSC_UDCODEC_FORMAT ? header->udcompcode : compcode;
+}
+
 static inline void blosc2_calculate_blocks(blosc2_context* context) {
   /* Compute number of blocks in buffer */
   context->nblocks = context->sourcesize / context->blocksize;
@@ -920,10 +931,7 @@ static int blosc2_initialize_context_from_header(blosc2_context* context, blosc_
   context->blocksize = header->blocksize;
   context->blosc2_flags2 = header->blosc2_flags2;
   context->blosc2_flags = header->blosc2_flags;
-  context->compcode = header->flags >> 5;
-  if (context->compcode == BLOSC_UDCODEC_FORMAT) {
-    context->compcode = header->udcompcode;
-  }
+  context->compcode = header_compcode(header);
   if (context->blosc2_flags2 & BLOSC2_VL_BLOCKS) {
     context->nblocks = header->blocksize;
     context->leftover = 0;
@@ -2521,6 +2529,35 @@ static int run_serial_job(blosc2_context* context) {
   return ntbytes;
 }
 
+/* Whether the codec `compcode` or one of `filters` was registered with
+   BLOSC2_CALLING_THREAD_ONLY, i.e. their callbacks must not run on worker threads */
+static bool ids_need_calling_thread(int compcode, const uint8_t* filters) {
+  if (!g_any_calling_thread_only) {
+    return false;
+  }
+  if (g_codec_calling_thread[(uint8_t)compcode]) {
+    return true;
+  }
+  for (int i = 0; i < BLOSC2_MAX_FILTERS; i++) {
+    if (g_filter_calling_thread[filters[i]]) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* See blosc-private.h */
+bool chunk_needs_calling_thread(const uint8_t* chunk, int32_t cbytes) {
+  if (!g_any_calling_thread_only) {
+    return false;
+  }
+  blosc_header header;
+  if (read_chunk_header(chunk, cbytes, true, &header) < 0) {
+    return true;
+  }
+  return ids_need_calling_thread(header_compcode(&header), header.filters);
+}
+
 /* Do the compression or decompression of the buffer depending on the
    global params. */
 static int do_job(blosc2_context* context) {
@@ -2540,8 +2577,10 @@ static int do_job(blosc2_context* context) {
 #endif
 
   /* Run serially with one thread, with fewer than two full blocks of source
-     data, or if thread configuration/backend setup fails. */
-  if (context->nthreads == 1 || (context->sourcesize / context->blocksize) <= 1 || rc < 0) {
+     data, if thread configuration/backend setup fails, or if the codec or a
+     filter must run on the calling thread. */
+  if (context->nthreads == 1 || (context->sourcesize / context->blocksize) <= 1 || rc < 0 ||
+      ids_need_calling_thread(context->compcode, context->filters)) {
     ntbytes = run_serial_job(context);
   }
   else {
@@ -6357,6 +6396,9 @@ void blosc2_init(void) {
   g_ncodecs = 0;
   g_nfilters = 0;
   g_ntuners = 0;
+  memset(g_codec_calling_thread, 0, sizeof(g_codec_calling_thread));
+  memset(g_filter_calling_thread, 0, sizeof(g_filter_calling_thread));
+  g_any_calling_thread_only = false;
 
 #if defined(HAVE_PLUGINS)
   #include "blosc2/blosc2-common.h"
@@ -7252,6 +7294,24 @@ int blosc2_chunk_repeatval(blosc2_cparams cparams, const int32_t nbytes,
 }
 
 
+/* Check `flags` of blosc2_register_codec_flags()/blosc2_register_filter_flags() */
+static int check_register_flags(int flags) {
+  if ((flags & ~BLOSC2_CALLING_THREAD_ONLY) != 0) {
+    BLOSC_TRACE_ERROR("Unknown flags: %d", flags);
+    return BLOSC2_ERROR_INVALID_PARAM;
+  }
+  return BLOSC2_ERROR_SUCCESS;
+}
+
+/* Record `flags` of codec or filter `id` (registered successfully) in its per-id table */
+static void set_register_flags(bool* calling_thread_table, uint8_t id, int flags) {
+  if (flags & BLOSC2_CALLING_THREAD_ONLY) {
+    calling_thread_table[id] = true;
+    g_any_calling_thread_only = true;
+  }
+}
+
+
 /* Register filters */
 
 int register_filter_private(blosc2_filter *filter) {
@@ -7292,13 +7352,24 @@ int register_filter_private(blosc2_filter *filter) {
 }
 
 
-int blosc2_register_filter(blosc2_filter *filter) {
+int blosc2_register_filter_flags(blosc2_filter *filter, int flags) {
+  BLOSC_ERROR_NULL(filter, BLOSC2_ERROR_INVALID_PARAM);
+  BLOSC_ERROR(check_register_flags(flags));
   if (filter->id < BLOSC2_USER_REGISTERED_FILTERS_START) {
     BLOSC_TRACE_ERROR("The id must be greater or equal to %d", BLOSC2_USER_REGISTERED_FILTERS_START);
     return BLOSC2_ERROR_FAILURE;
   }
 
-  return register_filter_private(filter);
+  int rc = register_filter_private(filter);
+  if (rc == BLOSC2_ERROR_SUCCESS) {
+    set_register_flags(g_filter_calling_thread, filter->id, flags);
+  }
+  return rc;
+}
+
+
+int blosc2_register_filter(blosc2_filter *filter) {
+  return blosc2_register_filter_flags(filter, 0);
 }
 
 
@@ -7342,13 +7413,24 @@ int register_codec_private(blosc2_codec *codec) {
 }
 
 
-int blosc2_register_codec(blosc2_codec *codec) {
+int blosc2_register_codec_flags(blosc2_codec *codec, int flags) {
+  BLOSC_ERROR_NULL(codec, BLOSC2_ERROR_INVALID_PARAM);
+  BLOSC_ERROR(check_register_flags(flags));
   if (codec->compcode < BLOSC2_USER_REGISTERED_CODECS_START) {
     BLOSC_TRACE_ERROR("The compcode must be greater or equal than %d", BLOSC2_USER_REGISTERED_CODECS_START);
     return BLOSC2_ERROR_CODEC_PARAM;
   }
 
-  return register_codec_private(codec);
+  int rc = register_codec_private(codec);
+  if (rc == BLOSC2_ERROR_SUCCESS) {
+    set_register_flags(g_codec_calling_thread, codec->compcode, flags);
+  }
+  return rc;
+}
+
+
+int blosc2_register_codec(blosc2_codec *codec) {
+  return blosc2_register_codec_flags(codec, 0);
 }
 
 

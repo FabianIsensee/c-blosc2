@@ -3007,6 +3007,29 @@ typedef struct {
  */
 BLOSC_EXPORT int blosc2_register_codec(blosc2_codec *codec);
 
+/**
+ * @brief Flags for registering codecs and filters with #blosc2_register_codec_flags and
+ * #blosc2_register_filter_flags.
+ */
+enum {
+  BLOSC2_CALLING_THREAD_ONLY = 0x1,
+  //!< The callbacks may only run on the thread that called C-Blosc2, one block after another.  For
+  //!< callbacks that need something only that thread has, such as a lock it holds (e.g. the GIL of
+  //!< Python), or that are not thread-safe.  Chunks that use such a codec or filter are compressed and
+  //!< decompressed without worker threads, whatever nthreads or BLOSC_NTHREADS say.
+};
+
+/**
+ * @brief Register locally a user-defined codec in Blosc, with flags.
+ *
+ * @param codec The codec to register.
+ * @param flags 0 or #BLOSC2_CALLING_THREAD_ONLY.  If the codec is registered already (same id and
+ * name), it keeps its callbacks and gets these flags in addition to the ones it has.
+ *
+ * @return 0 if succeeds. Else a negative code is returned.
+ */
+BLOSC_EXPORT int blosc2_register_codec_flags(blosc2_codec *codec, int flags);
+
 
 /*********************************************************************
   Structures and functions related with filters plugins.
@@ -3041,6 +3064,17 @@ typedef struct {
  * @return 0 if succeeds. Else a negative code is returned.
  */
 BLOSC_EXPORT int blosc2_register_filter(blosc2_filter *filter);
+
+/**
+ * @brief Register locally a user-defined filter in Blosc, with flags.
+ *
+ * @param filter The filter to register.
+ * @param flags 0 or #BLOSC2_CALLING_THREAD_ONLY.  If the filter is registered already (same id and
+ * name), it keeps its callbacks and gets these flags in addition to the ones it has.
+ *
+ * @return 0 if succeeds. Else a negative code is returned.
+ */
+BLOSC_EXPORT int blosc2_register_filter_flags(blosc2_filter *filter, int flags);
 
 /*********************************************************************
   Directory utilities.

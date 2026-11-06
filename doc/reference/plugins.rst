@@ -1,6 +1,8 @@
 Plugins
 =======
 
+.. doxygenenumvalue:: BLOSC2_CALLING_THREAD_ONLY
+
 Filters
 -------
 
@@ -12,6 +14,8 @@ Filters
 
 .. doxygenfunction:: blosc2_register_filter
 
+.. doxygenfunction:: blosc2_register_filter_flags
+
 Codecs
 ------
 
@@ -22,6 +26,8 @@ Codecs
    :members:
 
 .. doxygenfunction:: blosc2_register_codec
+
+.. doxygenfunction:: blosc2_register_codec_flags
 
 Tuners
 ------

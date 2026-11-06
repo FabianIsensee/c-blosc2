@@ -29,8 +29,13 @@
 int blosc2_decompress_block_ctx(blosc2_context* context, const void* src,
                                 int32_t srcsize, int32_t nblock, void* dest,
                                 int32_t destsize);
+/* Callers whose jobs run codecs or filters must use one thread for chunks that
+   chunk_needs_calling_thread() reports */
 int blosc2_run_parallel(int16_t nthreads, void (*dojob)(void *),
                         size_t jobdata_elsize, void *jobdata);
+/* Whether the blocks of `chunk` (`cbytes` long) must be processed on the calling thread: its codec or a
+   filter was registered with BLOSC2_CALLING_THREAD_ONLY.  A header that cannot be read counts as yes. */
+bool chunk_needs_calling_thread(const uint8_t* chunk, int32_t cbytes);
 
 #define to_little(dest, src, itemsize)    endian_handler(true, dest, src, itemsize)
 #define from_little(dest, src, itemsize)  endian_handler(true, dest, src, itemsize)

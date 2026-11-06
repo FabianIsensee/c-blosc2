@@ -2483,6 +2483,12 @@ int blosc2_schunk_get_sparse_buffer(blosc2_schunk *schunk, int64_t ncoords, cons
   if (nthreads < 1) {
     nthreads = 1;
   }
+  // A chunk whose codec or filter must run on the calling thread makes that the only worker
+  for (int64_t i = 0; nthreads > 1 && i < nchunks; ++i) {
+    if (chunk_needs_calling_thread(chunks[i].chunk, chunks[i].cbytes)) {
+      nthreads = 1;
+    }
+  }
   if ((int64_t)nthreads > ntasks) {
     nthreads = (int16_t)ntasks;
   }
